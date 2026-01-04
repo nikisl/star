@@ -2,124 +2,180 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>AI 粒子手势控制</title>
+    <title>AI 手势数字倒计时粒子系统</title>
     <style>
-        body { margin: 0; background: #000; color: #d4af37; overflow: hidden; font-family: -apple-system, sans-serif; }
-        #container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
-        #ui-layer {
-            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-            display: flex; flex-direction: column; justify-content: center; align-items: center;
-            z-index: 100; pointer-events: none;
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: '微軟正黑體', sans-serif; }
+        #container { width: 100vw; height: 100vh; }
+        .ui-panel {
+            position: absolute; top: 20px; left: 20px;
+            background: rgba(0, 0, 0, 0.8); padding: 20px;
+            border-radius: 15px; border: 2px solid #d4af37;
+            color: #d4af37; backdrop-filter: blur(15px); z-index: 100;
         }
-        #btn-start {
-            padding: 15px 40px; font-size: 20px; background: #d4af37; color: #000;
-            border: none; border-radius: 30px; cursor: pointer; pointer-events: auto;
-            box-shadow: 0 0 20px rgba(212, 175, 55, 0.5);
+        #countdown-display {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            font-size: 200px; color: white; font-weight: bold; pointer-events: none;
+            text-shadow: 0 0 20px rgba(212, 175, 55, 0.8); opacity: 0; transition: all 0.3s;
         }
-        #msg { margin-top: 20px; font-size: 14px; color: #fff; text-align: center; padding: 0 20px; }
-        #video-preview { 
-            position: absolute; bottom: 10px; right: 10px; width: 100px; height: 75px; 
-            border: 1px solid #d4af37; border-radius: 5px; transform: scaleX(-1); z-index: 50;
-            background: #111;
-        }
+        #video-input { position: fixed; bottom: 10px; right: 10px; width: 200px; height: 150px; 
+                       border: 2px solid #d4af37; border-radius: 10px; transform: scaleX(-1); }
+        .gesture-hint { font-size: 24px; color: #fff; margin-bottom: 10px; }
     </style>
 </head>
 <body>
 
-    <div id="container"></div>
-    <div id="ui-layer">
-        <button id="btn-start">点击开启魔法</button>
-        <div id="msg">提示：必须使用 HTTPS 并允许摄像头权限</div>
+    <div class="ui-panel">
+        <div class="gesture-hint">当前手势: <span id="gesture-name">等待中...</span></div>
+        <div id="status">系统状态：正在加载感知模型...</div>
+        <div style="color: #888; font-size: 12px; margin-top: 10px;">
+            请对着摄像头比出数字 3 -> 2 -> 1
+        </div>
     </div>
-    <video id="video-preview" playsinline></video>
+
+    <div id="countdown-display">3</div>
+    <video id="video-input"></video>
+    <div id="container"></div>
 
     <script src="https://cdn.jsdelivr.net/npm/three@0.152.0/build/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
 
     <script>
-        const btn = document.getElementById('btn-start');
-        const msg = document.getElementById('msg');
-        const video = document.getElementById('video-preview');
-        let hands, cameraHelper;
+        let scene, camera, renderer, particleSystem;
+        const PARTICLE_COUNT = 20000;
+        let targetPositions = new Float32Array(PARTICLE_COUNT * 3);
+        let currentMode = 'idle'; 
+        let countdownValue = null;
 
-        // 按钮点击后才触发音视频流（移动端浏览器合规要求）
-        btn.onclick = async () => {
-            btn.style.display = 'none';
-            msg.innerText = "正在呼叫摄像头...";
-            initAI();
-        };
+        // 1. 初始化场景
+        function initScene() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 6;
 
-        async function initAI() {
-            try {
-                // 1. 初始化 Three.js 场景
-                const scene = new THREE.Scene();
-                const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-                renderer.setSize(window.innerWidth, window.innerHeight);
-                renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // 限制像素比提升性能
-                document.getElementById('container').appendChild(renderer.domElement);
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.getElementById('container').appendChild(renderer.domElement);
 
-                const cam = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
-                cam.position.z = 5;
+            const geometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(PARTICLE_COUNT * 3);
+            for(let i=0; i<PARTICLE_COUNT*3; i++) positions[i] = (Math.random()-0.5)*15;
 
-                const points = new THREE.Points(
-                    new THREE.SphereGeometry(2, 32, 32),
-                    new THREE.PointsMaterial({ size: 0.03, color: 0xd4af37, transparent: true })
-                );
-                scene.add(points);
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            const material = new THREE.PointsMaterial({
+                size: 0.02, color: 0xd4af37, transparent: true, blending: THREE.AdditiveBlending
+            });
 
-                // 2. 配置 MediaPipe Hands
-                hands = new Hands({
-                    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
-                });
+            particleSystem = new THREE.Points(geometry, material);
+            scene.add(particleSystem);
+            window.addEventListener('resize', onWindowResize);
+        }
 
-                hands.setOptions({
-                    maxNumHands: 1,
-                    modelComplexity: 0, // 手机端设为0（快速模式）
-                    minDetectionConfidence: 0.5,
-                    minTrackingConfidence: 0.5
-                });
+        // 2. 核心：手势识别逻辑
+        function detectGesture(landmarks) {
+            // 计算手指是否伸直 (通过指尖 Y 坐标是否低于指根/第二关节)
+            const isFingerUp = (tipIdx, baseIdx) => landmarks[tipIdx].y < landmarks[baseIdx].y;
+            
+            const indexUp = isFingerUp(8, 6);
+            const middleUp = isFingerUp(12, 10);
+            const ringUp = isFingerUp(16, 14);
+            const littleUp = isFingerUp(20, 18);
 
-                hands.onResults((results) => {
-                    msg.style.display = 'none';
-                    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-                        const hand = results.multiHandLandmarks[0][8]; // 食指尖
-                        points.rotation.y = (hand.x - 0.5) * 5;
-                        points.rotation.x = (hand.y - 0.5) * 5;
-                    }
-                });
+            if (indexUp && middleUp && ringUp && !littleUp) return 3;
+            if (indexUp && middleUp && !ringUp && !littleUp) return 2;
+            if (indexUp && !middleUp && !ringUp && !littleUp) return 1;
+            return 0;
+        }
 
-                // 3. 启动摄像头
-                cameraHelper = new Camera(video, {
-                    onFrame: async () => { await hands.send({ image: video }); },
-                    width: 480, height: 360
-                });
+        // 3. 粒子变换特效
+        function updateParticleEffect(mode) {
+            const positions = targetPositions;
+            const color = particleSystem.material.color;
 
-                await cameraHelper.start();
-                msg.innerText = "运行中！请伸出手掌";
-
-                function animate() {
-                    requestAnimationFrame(animate);
-                    points.rotation.z += 0.005;
-                    renderer.render(scene, cam);
+            if (mode === 3) {
+                color.setHex(0x0088ff); // 蓝色
+                for (let i = 0; i < PARTICLE_COUNT; i++) {
+                    const angle = (i / PARTICLE_COUNT) * Math.PI * 2;
+                    positions[i*3] = Math.cos(angle) * 3;
+                    positions[i*3+1] = Math.sin(angle) * 3;
+                    positions[i*3+2] = (Math.random()-0.5) * 2;
                 }
-                animate();
-
-            } catch (e) {
-                msg.innerHTML = `<span style="color:red">启动失败: ${e.message}</span><br>请检查是否被系统拦截或浏览器不支持 WebGL。`;
-                console.error(e);
+            } else if (mode === 2) {
+                color.setHex(0x8800ff); // 紫色
+                for (let i = 0; i < PARTICLE_COUNT; i++) {
+                    const t = (i / PARTICLE_COUNT) * Math.PI * 4;
+                    positions[i*3] = Math.sin(t) * 2;
+                    positions[i*3+1] = (i / PARTICLE_COUNT - 0.5) * 6;
+                    positions[i*3+2] = Math.cos(t) * 2;
+                }
+            } else if (mode === 1) {
+                color.setHex(0xff0044); // 红色
+                for (let i = 0; i < PARTICLE_COUNT; i++) {
+                    const r = Math.random() * 0.5;
+                    const phi = Math.random() * Math.PI * 2;
+                    positions[i*3] = r * Math.cos(phi);
+                    positions[i*3+1] = r * Math.sin(phi);
+                    positions[i*3+2] = (Math.random()-0.5) * 10;
+                }
+            } else {
+                color.setHex(0xd4af37); // 默认金
+                for (let i = 0; i < PARTICLE_COUNT; i++) {
+                    positions[i*3] += (Math.random()-0.5)*0.1;
+                }
             }
         }
 
-        // 适配屏幕旋转
-        window.addEventListener('resize', () => {
-            if (cameraHelper) {
-                const width = window.innerWidth;
-                const height = window.innerHeight;
-                // 重新计算 Three.js 尺寸
+        // 4. MediaPipe 与 倒计时控制
+        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+        hands.setOptions({maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.7});
+
+        hands.onResults((results) => {
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const gesture = detectGesture(results.multiHandLandmarks[0]);
+                document.getElementById('gesture-name').innerText = gesture || "未知";
+                
+                if (gesture > 0) {
+                    updateParticleEffect(gesture);
+                    showCountdownUI(gesture);
+                }
             }
         });
+
+        function showCountdownUI(val) {
+            const el = document.getElementById('countdown-display');
+            el.innerText = val;
+            el.style.opacity = 1;
+            el.style.transform = "translate(-50%, -50%) scale(1.5)";
+            setTimeout(() => { el.style.opacity = 0; el.style.transform = "translate(-50%, -50%) scale(1)"; }, 500);
+        }
+
+        const cameraFeed = new Camera(document.getElementById('video-input'), {
+            onFrame: async () => { await hands.send({image: document.getElementById('video-input')}); },
+            width: 640, height: 480
+        });
+        cameraFeed.start();
+
+        // 5. 渲染循环
+        function animate() {
+            requestAnimationFrame(animate);
+            const pos = particleSystem.geometry.attributes.position.array;
+            for (let i = 0; i < PARTICLE_COUNT * 3; i++) {
+                pos[i] += (targetPositions[i] - pos[i]) * 0.1; // 平滑过渡
+            }
+            particleSystem.geometry.attributes.position.needsUpdate = true;
+            particleSystem.rotation.y += 0.005;
+            renderer.render(scene, camera);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        initScene();
+        animate();
+        document.getElementById('status').innerText = "系统就绪：请比划数字";
     </script>
 </body>
 </html>
