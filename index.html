@@ -1,180 +1,150 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>粒子大爆炸-修复版</title>
+    <title>手势粒子倒计时</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
     <style>
-        body { margin: 0; background: #000; overflow: hidden; font-family: sans-serif; }
-        
-        /* 启动层：强制用户点击 */
-        #start-screen {
-            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0,0,0,0.9); z-index: 9999;
-            display: flex; flex-direction: column; justify-content: center; align-items: center;
-        }
-        #btn-start {
-            padding: 20px 50px; font-size: 24px; background: #00ffff; border: none;
-            border-radius: 50px; font-weight: bold; box-shadow: 0 0 20px #00ffff;
-        }
-        
-        /* UI 显示层 */
-        #ui-layer {
-            position: absolute; top: 20px; left: 0; width: 100%; text-align: center;
-            pointer-events: none; z-index: 100;
-        }
-        #number-display {
-            font-size: 100px; color: #fff; font-weight: 900;
-            text-shadow: 0 0 30px #fff; transition: transform 0.2s;
-        }
-        #msg { color: #aaa; font-size: 16px; margin-top: 10px; background: rgba(0,0,0,0.5); display: inline-block; padding: 5px 10px; border-radius: 5px;}
-
-        /* 调试日志 (位于底部) */
-        #debug-log {
-            position: absolute; bottom: 0; left: 0; width: 100%; height: 100px;
-            background: rgba(0,0,0,0.5); color: #0f0; font-size: 12px;
-            pointer-events: none; z-index: 90; overflow: hidden;
-            padding: 5px; box-sizing: border-box;
-        }
-
-        /* 摄像头小窗 (保留用于确认摄像头是否开启) */
-        #cam-preview {
-            position: absolute; bottom: 110px; right: 10px; width: 100px;
-            border: 1px solid #fff; z-index: 50; transform: scaleX(-1);
-            opacity: 0.7;
-        }
-        
-        #flash {
-            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-            background: #fff; opacity: 0; pointer-events: none; z-index: 200;
-        }
+        body { margin: 0; background: #000; overflow: hidden; color: white; }
+        #video_input { display: none; }
+        #canvas_output { width: 100vw; height: 100vh; object-fit: cover; }
+        #info { position: absolute; top: 20px; left: 20px; font-family: sans-serif; color: rgba(255,255,255,0.5); }
     </style>
 </head>
 <body>
+    <div id="info">请对着镜头比划数字 5 -> 1</div>
+    <video id="video_input"></video>
+    <canvas id="canvas_output"></canvas>
 
-    <div id="start-screen">
-        <button id="btn-start">点击启动系统</button>
-        <p style="color:#666; margin-top:20px;">请授予摄像头权限</p>
-    </div>
+<script>
+const videoElement = document.getElementById('video_input');
+const canvasElement = document.getElementById('canvas_output');
+const canvasCtx = canvasElement.getContext('2d');
 
-    <div id="ui-layer">
-        <div id="number-display">5</div>
-        <div id="msg">等待启动...</div>
-    </div>
-    <div id="flash"></div>
+let currentNumber = 5;
+let particles = [];
+let targetPoints = [];
+const particleCount = 1200; // 粒子数量
 
-    <div id="debug-log">系统准备就绪...</div>
-    <video id="cam-preview" playsinline></video>
-    <div id="container"></div>
+// 1. 初始化粒子类
+class Particle {
+    constructor() {
+        this.x = Math.random() * window.innerWidth;
+        this.y = Math.random() * window.innerHeight;
+        this.destX = this.x;
+        this.destY = this.y;
+        this.vx = 0;
+        this.vy = 0;
+        this.friction = 0.85; // 阻力
+        this.ease = 0.15;     // 缓动系数
+        this.color = `hsla(${Math.random() * 360}, 100%, 70%, 0.8)`;
+    }
 
-    <script src="https://cdn.jsdelivr.net/npm/three@0.152.0/build/three.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    update() {
+        // 计算向目标的拉力
+        this.vx += (this.destX - this.x) * this.ease;
+        this.vy += (this.destY - this.y) * this.ease;
+        this.vx *= this.friction;
+        this.vy *= this.friction;
+        this.x += this.vx;
+        this.y += this.vy;
+    }
 
-    <script>
-        const logEl = document.getElementById('debug-log');
-        const msgEl = document.getElementById('msg');
-        const numEl = document.getElementById('number-display');
-        
-        function log(text) {
-            logEl.innerHTML = `[${new Date().toLocaleTimeString()}] ${text}<br>` + logEl.innerHTML;
-        }
+    draw() {
+        canvasCtx.fillStyle = this.color;
+        canvasCtx.beginPath();
+        canvasCtx.arc(this.x, this.y, 1.8, 0, Math.PI * 2);
+        canvasCtx.fill();
+    }
+}
 
-        // 核心状态
-        let currentTarget = 5;
-        let isExploding = false;
-        let lastTriggerTime = 0;
-        
-        // Three.js 变量
-        let scene, camera, renderer, particles, positions, colors, targetPositions, velocities;
-        const COUNT = 15000; // 手机端适中数量
+// 2. 采样数字坐标
+function sampleNumber(num) {
+    const tempCanvas = document.createElement('canvas');
+    const tCtx = tempCanvas.getContext('2d');
+    tempCanvas.width = window.innerWidth;
+    tempCanvas.height = window.innerHeight;
+    
+    tCtx.font = "bold 500px Arial";
+    tCtx.textAlign = "center";
+    tCtx.textBaseline = "middle";
+    tCtx.fillText(num, tempCanvas.width / 2, tempCanvas.height / 2);
 
-        // ============================
-        // 1. 启动逻辑 (解决权限问题)
-        // ============================
-        document.getElementById('btn-start').onclick = async function() {
-            this.parentElement.style.display = 'none';
-            log("用户点击启动...");
-            msgEl.innerText = "正在加载 AI 模型 (约需 5-10 秒)...";
-            
-            try {
-                initThree();
-                await initMediaPipe();
-            } catch (e) {
-                log("<span style='color:red'>启动错误: " + e.message + "</span>");
-                alert("启动失败，请检查浏览器权限或切换 HTTPS");
+    const imageData = tCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height).data;
+    const newTargets = [];
+    // 隔行采样以提升性能
+    for (let y = 0; y < tempCanvas.height; y += 8) {
+        for (let x = 0; x < tempCanvas.width; x += 8) {
+            const alpha = imageData[(y * tempCanvas.width + x) * 4 + 3];
+            if (alpha > 128) {
+                newTargets.push({x, y});
             }
-        };
-
-        // ============================
-        // 2. Three.js 初始化
-        // ============================
-        function initThree() {
-            scene = new THREE.Scene();
-            camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
-            camera.position.z = 10;
-
-            renderer = new THREE.WebGLRenderer({antialias: false}); // 关闭抗锯齿提升性能
-            renderer.setSize(window.innerWidth, window.innerHeight);
-            document.getElementById('container').appendChild(renderer.domElement);
-
-            // 粒子系统初始化
-            const geo = new THREE.BufferGeometry();
-            positions = new Float32Array(COUNT * 3);
-            colors = new Float32Array(COUNT * 3);
-            targetPositions = new Float32Array(COUNT * 3);
-            velocities = new Float32Array(COUNT * 3);
-
-            for(let i=0; i<COUNT; i++) {
-                const i3 = i*3;
-                positions[i3] = (Math.random()-0.5)*15;
-                positions[i3+1] = (Math.random()-0.5)*15;
-                positions[i3+2] = (Math.random()-0.5)*15;
-                colors[i3] = 0.2; colors[i3+1] = 0.5; colors[i3+2] = 1.0;
-            }
-
-            geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-            geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-            
-            const mat = new THREE.PointsMaterial({
-                size: 0.08, vertexColors: true, 
-                blending: THREE.AdditiveBlending, transparent: true
-            });
-
-            particles = new THREE.Points(geo, mat);
-            scene.add(particles);
-
-            setShape(5); // 初始形状
-            animate();
-            log("3D 引擎加载完成");
         }
+    }
+    return newTargets;
+}
 
-        // ============================
-        // 3. 粒子形状逻辑
-        // ============================
-        function setShape(num) {
-            const time = Date.now() * 0.001;
-            for(let i=0; i<COUNT; i++) {
-                const i3 = i*3;
-                let x,y,z,r,g,b;
-                
-                if (num === 5) { // 环
-                    const angle = (i/COUNT) * Math.PI * 20;
-                    const rad = 4 + Math.random();
-                    x = Math.cos(angle)*rad; y = Math.sin(angle)*rad; z = (Math.random()-0.5)*2;
-                    r=0; g=1; b=1;
-                } else if (num === 4) { // 盒
-                    x=(Math.random()-0.5)*6; y=(Math.random()-0.5)*6; z=(Math.random()-0.5)*6;
-                    r=0; g=1; b=0;
-                } else if (num === 3) { // 螺旋
-                    const angle = i * 0.01;
-                    x = Math.sin(angle)*3; y = (i/COUNT - 0.5)*10; z = Math.cos(angle)*3;
-                    r=1; g=0; b=1;
-                } else if (num === 2) { // 双球
-                    const offset = (i%2===0)? 2.5 : -2.5;
-                    const rad = 2;
-                    // 简化的球坐标
-                    const u = Math.random(); const v = Math.random();
-                    const theta = 2 * Math.PI * u; const phi = Math.acos(2 * v - 1);
-                    x = offset + rad * Math.sin(phi) * Math.cos(theta);
-                    y = rad * Math.
+// 3. 宇宙大爆炸效果
+function triggerBigBang() {
+    particles.forEach(p => {
+        const angle = Math.random() * Math.PI * 2;
+        const force = Math.random() * 100;
+        p.destX = p.x + Math.cos(angle) * force * 10;
+        p.destY = p.y + Math.sin(angle) * force * 10;
+        p.ease = 0.02; // 爆炸时更慢更松散
+    });
+}
+
+// 4. 手势识别逻辑
+function onResults(results) {
+    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        const landmarks = results.multiHandLandmarks[0];
+        // 简易手指计数算法
+        const count = [8, 12, 16, 20].reduce((acc, tip) => {
+            return landmarks[tip].y < landmarks[tip - 2].y ? acc + 1 : acc;
+        }, landmarks[4].x < landmarks[3].x ? 1 : 0);
+
+        if (count === currentNumber && currentNumber > 0) {
+            targetPoints = sampleNumber(currentNumber);
+            // 分配目标点
+            for (let i = 0; i < particles.length; i++) {
+                const target = targetPoints[i % targetPoints.length];
+                particles[i].destX = target.x;
+                particles[i].destY = target.y;
+            }
+            currentNumber--;
+            if (currentNumber === 0) {
+                setTimeout(triggerBigBang, 800);
+            }
+        }
+    }
+
+    // 渲染粒子
+    canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+    particles.forEach(p => {
+        p.update();
+        p.draw();
+    });
+}
+
+// 初始化
+function init() {
+    canvasElement.width = window.innerWidth;
+    canvasElement.height = window.innerHeight;
+    for (let i = 0; i < particleCount; i++) particles.push(new Particle());
+
+    const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+    hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+    hands.onResults(onResults);
+
+    const camera = new Camera(videoElement, {
+        onFrame: async () => await hands.send({image: videoElement}),
+        width: 1280, height: 720
+    });
+    camera.start();
+}
+
+init();
+</script>
+</body>
+</html>
