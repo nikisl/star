@@ -2,44 +2,69 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>手势粒子大爆炸倒计时</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>粒子大爆炸-修复版</title>
     <style>
-        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Arial', sans-serif; }
-        #container { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; }
+        body { margin: 0; background: #000; overflow: hidden; font-family: sans-serif; }
         
-        /* UI 界面层 */
-        #ui-overlay {
-            position: absolute; top: 20px; left: 0; width: 100%;
-            text-align: center; pointer-events: none; z-index: 10;
-            text-shadow: 0 0 10px rgba(0,0,0,0.8);
+        /* 启动层：强制用户点击 */
+        #start-screen {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.9); z-index: 9999;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
         }
-        #status-text { color: #aaa; font-size: 18px; letter-spacing: 2px; margin-bottom: 10px; }
-        #target-number { 
-            font-size: 120px; font-weight: 900; color: #fff; 
-            text-shadow: 0 0 20px #00ffff, 0 0 40px #00ffff;
-            transition: all 0.3s ease-out;
+        #btn-start {
+            padding: 20px 50px; font-size: 24px; background: #00ffff; border: none;
+            border-radius: 50px; font-weight: bold; box-shadow: 0 0 20px #00ffff;
         }
         
-        /* 爆炸时的闪光层 */
-        #flash-overlay {
-            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-            background: white; opacity: 0; pointer-events: none; z-index: 100;
+        /* UI 显示层 */
+        #ui-layer {
+            position: absolute; top: 20px; left: 0; width: 100%; text-align: center;
+            pointer-events: none; z-index: 100;
+        }
+        #number-display {
+            font-size: 100px; color: #fff; font-weight: 900;
+            text-shadow: 0 0 30px #fff; transition: transform 0.2s;
+        }
+        #msg { color: #aaa; font-size: 16px; margin-top: 10px; background: rgba(0,0,0,0.5); display: inline-block; padding: 5px 10px; border-radius: 5px;}
+
+        /* 调试日志 (位于底部) */
+        #debug-log {
+            position: absolute; bottom: 0; left: 0; width: 100%; height: 100px;
+            background: rgba(0,0,0,0.5); color: #0f0; font-size: 12px;
+            pointer-events: none; z-index: 90; overflow: hidden;
+            padding: 5px; box-sizing: border-box;
         }
 
-        /* 摄像头预览（调试用，默认隐藏，可取消注释查看） */
-        #video-input { position: fixed; bottom: 10px; right: 10px; width: 160px; height: 120px; opacity: 0.5; transform: scaleX(-1); z-index: 20; display: none;}
+        /* 摄像头小窗 (保留用于确认摄像头是否开启) */
+        #cam-preview {
+            position: absolute; bottom: 110px; right: 10px; width: 100px;
+            border: 1px solid #fff; z-index: 50; transform: scaleX(-1);
+            opacity: 0.7;
+        }
+        
+        #flash {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: #fff; opacity: 0; pointer-events: none; z-index: 200;
+        }
     </style>
 </head>
 <body>
 
-    <div id="ui-overlay">
-        <div id="status-text">等待手势信号...</div>
-        <div id="target-number">5</div>
+    <div id="start-screen">
+        <button id="btn-start">点击启动系统</button>
+        <p style="color:#666; margin-top:20px;">请授予摄像头权限</p>
     </div>
-    <div id="flash-overlay"></div>
 
-    <video id="video-input" playsinline></video>
+    <div id="ui-layer">
+        <div id="number-display">5</div>
+        <div id="msg">等待启动...</div>
+    </div>
+    <div id="flash"></div>
+
+    <div id="debug-log">系统准备就绪...</div>
+    <video id="cam-preview" playsinline></video>
     <div id="container"></div>
 
     <script src="https://cdn.jsdelivr.net/npm/three@0.152.0/build/three.min.js"></script>
@@ -47,222 +72,109 @@
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
 
     <script>
-        // --- 配置参数 ---
-        const PARTICLE_COUNT = 35000; // 粒子总数，越多越震撼，但性能要求越高
-        const CAMERA_Z = 12; // 摄像机距离
+        const logEl = document.getElementById('debug-log');
+        const msgEl = document.getElementById('msg');
+        const numEl = document.getElementById('number-display');
         
-        // --- 全局变量 ---
-        let scene, camera, renderer, particleSystem;
-        let positions, targetPositions, colors, velocities; // 粒子属性数组
-        let gameState = {
-            currentStep: 5, // 当前等待的数字 (5 -> 1)
-            isExploding: false, // 是否处于爆炸状态
-            lastGestureTime: 0 // 用于防止手势抖动重复触发
+        function log(text) {
+            logEl.innerHTML = `[${new Date().toLocaleTimeString()}] ${text}<br>` + logEl.innerHTML;
+        }
+
+        // 核心状态
+        let currentTarget = 5;
+        let isExploding = false;
+        let lastTriggerTime = 0;
+        
+        // Three.js 变量
+        let scene, camera, renderer, particles, positions, colors, targetPositions, velocities;
+        const COUNT = 15000; // 手机端适中数量
+
+        // ============================
+        // 1. 启动逻辑 (解决权限问题)
+        // ============================
+        document.getElementById('btn-start').onclick = async function() {
+            this.parentElement.style.display = 'none';
+            log("用户点击启动...");
+            msgEl.innerText = "正在加载 AI 模型 (约需 5-10 秒)...";
+            
+            try {
+                initThree();
+                await initMediaPipe();
+            } catch (e) {
+                log("<span style='color:red'>启动错误: " + e.message + "</span>");
+                alert("启动失败，请检查浏览器权限或切换 HTTPS");
+            }
         };
 
-        const statusTextEl = document.getElementById('status-text');
-        const targetNumberEl = document.getElementById('target-number');
-        const flashOverlayEl = document.getElementById('flash-overlay');
-
-        // ==========================================
-        // 1. Three.js 场景初始化
-        // ==========================================
-        function initScene() {
+        // ============================
+        // 2. Three.js 初始化
+        // ============================
+        function initThree() {
             scene = new THREE.Scene();
-            scene.fog = new THREE.FogExp2(0x000000, 0.02); // 添加一点雾气增加深邃感
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+            camera.position.z = 10;
 
-            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-            camera.position.z = CAMERA_Z;
-
-            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer = new THREE.WebGLRenderer({antialias: false}); // 关闭抗锯齿提升性能
             renderer.setSize(window.innerWidth, window.innerHeight);
-            renderer.setPixelRatio(window.devicePixelRatio);
             document.getElementById('container').appendChild(renderer.domElement);
 
-            // --- 初始化粒子系统 ---
-            const geometry = new THREE.BufferGeometry();
-            positions = new Float32Array(PARTICLE_COUNT * 3);
-            targetPositions = new Float32Array(PARTICLE_COUNT * 3); // 粒子要去的目标位置
-            colors = new Float32Array(PARTICLE_COUNT * 3);
-            velocities = new Float32Array(PARTICLE_COUNT * 3); // 爆炸时用的速度向量
+            // 粒子系统初始化
+            const geo = new THREE.BufferGeometry();
+            positions = new Float32Array(COUNT * 3);
+            colors = new Float32Array(COUNT * 3);
+            targetPositions = new Float32Array(COUNT * 3);
+            velocities = new Float32Array(COUNT * 3);
 
-            // 初始状态：随机散布
-            for (let i = 0; i < PARTICLE_COUNT; i++) {
-                const i3 = i * 3;
-                positions[i3] = (Math.random() - 0.5) * 20;
-                positions[i3 + 1] = (Math.random() - 0.5) * 20;
-                positions[i3 + 2] = (Math.random() - 0.5) * 20;
-                // 初始化颜色为暗蓝色
-                colors[i3] = 0.1; colors[i3+1] = 0.3; colors[i3+2] = 0.8;
+            for(let i=0; i<COUNT; i++) {
+                const i3 = i*3;
+                positions[i3] = (Math.random()-0.5)*15;
+                positions[i3+1] = (Math.random()-0.5)*15;
+                positions[i3+2] = (Math.random()-0.5)*15;
+                colors[i3] = 0.2; colors[i3+1] = 0.5; colors[i3+2] = 1.0;
             }
 
-            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-
-            // 使用自定义材质点，启用顶点颜色
-            const material = new THREE.PointsMaterial({
-                size: 0.05,
-                vertexColors: true,
-                blending: THREE.AdditiveBlending, // 发光叠加效果
-                transparent: true,
-                depthWrite: false
+            geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            
+            const mat = new THREE.PointsMaterial({
+                size: 0.08, vertexColors: true, 
+                blending: THREE.AdditiveBlending, transparent: true
             });
 
-            particleSystem = new THREE.Points(geometry, material);
-            scene.add(particleSystem);
+            particles = new THREE.Points(geo, mat);
+            scene.add(particles);
 
-            // 初始形态：数字 5
-            morphToShape(5);
-            updateUI(5, "请伸出 5 个手指开始倒计时");
-
-            window.addEventListener('resize', onWindowResize);
+            setShape(5); // 初始形状
+            animate();
+            log("3D 引擎加载完成");
         }
 
-        // ==========================================
-        // 2. 粒子形态数学模型 (核心视觉效果)
-        // ==========================================
-        function morphToShape(number) {
-            const pos = targetPositions;
-            const col = colors;
+        // ============================
+        // 3. 粒子形状逻辑
+        // ============================
+        function setShape(num) {
             const time = Date.now() * 0.001;
-
-            for (let i = 0; i < PARTICLE_COUNT; i++) {
-                const i3 = i * 3;
-                const p = i / PARTICLE_COUNT; // 归一化索引 0-1
-                let x, y, z, r, g, b;
-
-                switch (number) {
-                    case 5: // 巨大的能量环/球
-                        statusTextEl.style.color = "#00ffff";
-                        targetNumberEl.style.textShadow = "0 0 20px #00ffff";
-                        const phi5 = Math.acos(-1 + (2 * i) / PARTICLE_COUNT);
-                        const theta5 = Math.sqrt(PARTICLE_COUNT * Math.PI) * phi5;
-                        const radius5 = 6 + Math.sin(phi5 * 10 + time)*0.2; // 表面微动
-                        x = radius5 * Math.cos(theta5) * Math.sin(phi5);
-                        y = radius5 * Math.sin(theta5) * Math.sin(phi5);
-                        z = radius5 * Math.cos(phi5);
-                        r=0.1; g=0.8; b=1.0; // 青蓝色
-                        break;
-
-                    case 4: // 立方体矩阵
-                        statusTextEl.style.color = "#00ff00";
-                        targetNumberEl.style.textShadow = "0 0 20px #00ff00";
-                        const side = Math.cbrt(PARTICLE_COUNT);
-                        const spacing = 6 / side;
-                        const ix = i % side;
-                        const iy = Math.floor(i / side) % side;
-                        const iz = Math.floor(i / (side * side));
-                        x = (ix - side / 2) * spacing + (Math.random()-0.5)*0.2;
-                        y = (iy - side / 2) * spacing + (Math.random()-0.5)*0.2;
-                        z = (iz - side / 2) * spacing + (Math.random()-0.5)*0.2;
-                        r=0.2; g=1.0; b=0.2; // 绿色
-                        break;
-
-                    case 3: // 双螺旋 DNA
-                        statusTextEl.style.color = "#ff00ff";
-                        targetNumberEl.style.textShadow = "0 0 20px #ff00ff";
-                        const turns = 5;
-                        const height = 10;
-                        const radius3 = 3;
-                        const angle3 = p * Math.PI * 2 * turns;
-                        const strand = i % 2 === 0 ? 1 : -1; // 两条链
-                        x = Math.cos(angle3 + strand * Math.PI) * radius3;
-                        y = (p - 0.5) * height;
-                        z = Math.sin(angle3 + strand * Math.PI) * radius3;
-                        r=1.0; g=0.2; b=1.0; // 紫色
-                        break;
-                        
-                    case 2: // 双子星环绕
-                        statusTextEl.style.color = "#ffaa00";
-                        targetNumberEl.style.textShadow = "0 0 20px #ffaa00";
-                        const sphereIdx = i % 2 === 0 ? 1 : -1; // 分属两个球体
-                        const offset = 3.5;
-                        const phi2 = Math.acos(-1 + (2 * (i/2)) / (PARTICLE_COUNT/2));
-                        const theta2 = Math.sqrt((PARTICLE_COUNT/2) * Math.PI) * phi2;
-                        const r2 = 2;
-                        // 基础球体形状 + 整体环绕偏移
-                        x = r2 * Math.cos(theta2) * Math.sin(phi2) + offset * sphereIdx * Math.cos(time);
-                        y = r2 * Math.sin(theta2) * Math.sin(phi2);
-                        z = r2 * Math.cos(phi2) + offset * sphereIdx * Math.sin(time);
-                        r=1.0; g=0.6; b=0.1; // 橙色
-                        break;
-
-                    case 1: // 奇点 (极度压缩)
-                        statusTextEl.style.color = "#ff0000";
-                        targetNumberEl.style.textShadow = "0 0 30px #ff0000, 0 0 60px #ff0000";
-                        // 所有粒子挤压到中心，带有强烈的颤抖
-                        const shake = 0.3; 
-                        x = (Math.random() - 0.5) * shake;
-                        y = (Math.random() - 0.5) * shake;
-                        z = (Math.random() - 0.5) * shake;
-                        // 中心亮白，边缘红
-                        const dist = Math.sqrt(x*x+y*y+z*z);
-                        r=1.0; g=1.0-dist*2; b=1.0-dist*2; 
-                        break;
-                }
-
-                // 设置目标颜色
-                colors[i3] = r; colors[i3+1] = g; colors[i3+2] = b;
+            for(let i=0; i<COUNT; i++) {
+                const i3 = i*3;
+                let x,y,z,r,g,b;
                 
-                // 如果不是爆炸状态，更新目标位置
-                if (!gameState.isExploding) {
-                    pos[i3] = x;
-                    pos[i3+1] = y;
-                    pos[i3+2] = z;
-                }
-            }
-            particleSystem.geometry.attributes.color.needsUpdate = true;
-        }
-
-        // ==========================================
-        // 3. 大爆炸逻辑
-        // ==========================================
-        function triggerBigBang() {
-            gameState.isExploding = true;
-            updateUI("", "💥 BIG BANG! 💥");
-            targetNumberEl.style.opacity = 0;
-
-            // 1. 屏幕闪白光
-            flashOverlayEl.style.opacity = 1;
-            setTimeout(() => { flashOverlayEl.style.transition = "opacity 2s"; flashOverlayEl.style.opacity = 0; }, 100);
-
-            // 2. 为所有粒子赋予向外的爆炸速度
-            for (let i = 0; i < PARTICLE_COUNT; i++) {
-                const i3 = i * 3;
-                // 速度方向：从中心向外
-                const vx = positions[i3] * (Math.random() * 5 + 2); // 随机速度大小
-                const vy = positions[i3+1] * (Math.random() * 5 + 2);
-                const vz = positions[i3+2] * (Math.random() * 5 + 2);
-                
-                // 添加一些随机扰动
-                velocities[i3] = vx + (Math.random()-0.5)*2;
-                velocities[i3+1] = vy + (Math.random()-0.5)*2;
-                velocities[i3+2] = vz + (Math.random()-0.5)*2;
-
-                // 爆炸时颜色变超亮白
-                colors[i3] = 2.0; colors[i3+1] = 2.0; colors[i3+2] = 2.0;
-            }
-            particleSystem.geometry.attributes.color.needsUpdate = true;
-            // 增大粒子尺寸增强冲击力
-            particleSystem.material.size = 0.1; 
-        }
-
-
-        // ==========================================
-        // 4. 手势识别逻辑 (MediaPipe)
-        // ==========================================
-        const videoElement = document.getElementById('video-input');
-        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
-        hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.7, minTrackingConfidence: 0.7 });
-
-        hands.onResults((results) => {
-            if (gameState.isExploding || !results.multiHandLandmarks.length) return;
-
-            const landmarks = results.multiHandLandmarks[0];
-            const detectedNumber = countFingers(landmarks);
-            const now = Date.now();
-
-            // 核心逻辑：严格顺序匹配
-            // 只有当识别出的数字 === 当前等待的数字，并且距离上次触发超过500ms(防抖)
-            if (detectedNumber === gameState.currentStep && (now - gameState.lastGestureTime > 500)) {
-                gameState.lastGestureTime = now;
+                if (num === 5) { // 环
+                    const angle = (i/COUNT) * Math.PI * 20;
+                    const rad = 4 + Math.random();
+                    x = Math.cos(angle)*rad; y = Math.sin(angle)*rad; z = (Math.random()-0.5)*2;
+                    r=0; g=1; b=1;
+                } else if (num === 4) { // 盒
+                    x=(Math.random()-0.5)*6; y=(Math.random()-0.5)*6; z=(Math.random()-0.5)*6;
+                    r=0; g=1; b=0;
+                } else if (num === 3) { // 螺旋
+                    const angle = i * 0.01;
+                    x = Math.sin(angle)*3; y = (i/COUNT - 0.5)*10; z = Math.cos(angle)*3;
+                    r=1; g=0; b=1;
+                } else if (num === 2) { // 双球
+                    const offset = (i%2===0)? 2.5 : -2.5;
+                    const rad = 2;
+                    // 简化的球坐标
+                    const u = Math.random(); const v = Math.random();
+                    const theta = 2 * Math.PI * u; const phi = Math.acos(2 * v - 1);
+                    x = offset + rad * Math.sin(phi) * Math.cos(theta);
+                    y = rad * Math.
